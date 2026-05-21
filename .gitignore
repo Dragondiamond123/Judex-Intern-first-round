@@ -1,0 +1,9 @@
+node_modules/
+dist/
+backup/
+*.mp4
+serve/
+hello1/
+hello1old/
+.mypy_cache/
+.DS_Store
