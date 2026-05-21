@@ -39,7 +39,7 @@ function EventPanel({ event, onClose, eventIndex, totalEvents }) {
           }
         }
       })
-    }, 1000)
+    }, 150)
     return () => clearInterval(syncInterval)
   }, [playing])
 

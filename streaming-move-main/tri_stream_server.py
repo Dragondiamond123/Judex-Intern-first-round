@@ -84,6 +84,8 @@ events_list = []
 
 camera_streams = {}
 
+global_sync_rows = []
+
 
 
 
@@ -190,9 +192,9 @@ def load_sync_table():
 
     print(f"    {len(source_frames)} sync rows loaded")
 
-    
-    
+    global global_sync_rows
     sync_rows = list(zip(source_frames, sink_frames, hq_frames))
+    global_sync_rows = sync_rows
 
     
     cameras = ['source', 'sink', 'hq']
@@ -559,30 +561,75 @@ class TriStreamHandler(BaseHTTPRequestHandler):
     def api_cameras(self):
         port = SERVER_PORT
         result = {
-            'source': {
-                'stream_url': f'http://localhost:{port}/source/live.m3u8',
-                'label': 'Source',
-                'color': '#4ade80',
-            },
-            'sink': {
-                'stream_url': f'http://localhost:{port}/sink/live.m3u8',
-                'label': 'Sink',
-                'color': '#60a5fa',
-            },
-            'hq': {
-                'stream_url': f'http://localhost:{port}/hq/live.m3u8',
-                'label': 'HQ',
-                'color': '#f5a623',
-            },
+            'source': f'http://localhost:{port}/source/live.m3u8',
+            'sink': f'http://localhost:{port}/sink/live.m3u8',
+            'hq': f'http://localhost:{port}/hq/live.m3u8',
         }
         self.send_json(result)
 
     def api_sync(self, params):
         from_camera = params.get('from_camera', [None])[0]
         from_seg_raw = params.get('from_seg', [None])[0]
+        from_time_raw = params.get('from_time', [None])[0]
 
-        if not from_camera or from_seg_raw is None:
-            self.send_json({'error': 'Missing from_camera or from_seg'}, 400)
+        if not from_camera:
+            self.send_json({'error': 'Missing from_camera'}, 400)
+            return
+            
+        if from_time_raw is not None:
+            try:
+                from_time = float(from_time_raw)
+            except ValueError:
+                self.send_json({'error': 'from_time must be float'}, 400)
+                return
+
+            times = camera_playback_times.get(from_camera, [])
+            playlist = camera_playlists.get(from_camera, [])
+            entries = camera_frame_indices.get(from_camera, [])
+
+            if not times or not playlist or not entries or not global_sync_rows:
+                self.send_json({'error': 'Data not ready'}, 500)
+                return
+
+            seg_idx = bisect.bisect_right(times, from_time) - 1
+            if seg_idx < 0: seg_idx = 0
+            
+            if seg_idx < len(entries):
+                entry = entries[seg_idx]
+                time_within_seg = from_time - times[seg_idx]
+                seg_dur = playlist[seg_idx][0]
+                frame_offset = int((time_within_seg / max(seg_dur, 0.001)) * entry['frame_count'])
+                target_frame = entry['cumulative_start_frame'] + frame_offset
+            else:
+                target_frame = entries[-1]['cumulative_start_frame'] + entries[-1]['frame_count']
+
+            cam_frame_col = {'source': 0, 'sink': 1, 'hq': 2}
+            from_col = cam_frame_col[from_camera]
+            frame_list = [r[from_col] for r in global_sync_rows]
+            
+            row_idx = bisect.bisect_left(frame_list, target_frame)
+            if row_idx >= len(global_sync_rows):
+                row_idx = len(global_sync_rows) - 1
+            if row_idx > 0:
+                if abs(frame_list[row_idx - 1] - target_frame) < abs(frame_list[row_idx] - target_frame):
+                    row_idx -= 1
+                    
+            sync_row = global_sync_rows[row_idx]
+            mapping = {}
+            for to_cam in ['source', 'sink', 'hq']:
+                to_col = cam_frame_col[to_cam]
+                to_frame = sync_row[to_col]
+                to_entries = camera_frame_indices.get(to_cam, [])
+                if not to_entries: continue
+                to_seg, _ = frame_to_segment(to_entries, to_frame)
+                to_time = frame_to_playback_time(to_cam, to_frame)
+                mapping[to_cam] = {'segment': to_seg, 'time': round(to_time, 3)}
+
+            self.send_json(mapping)
+            return
+
+        if from_seg_raw is None:
+            self.send_json({'error': 'Missing from_seg'}, 400)
             return
 
         try:

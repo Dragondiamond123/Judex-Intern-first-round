@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback, useEffect, memo } from 'react'
+import { useRef, useState, useCallback, useEffect, memo, useMemo } from 'react'
 
 
 function toFraction(t, start, end) {
@@ -22,6 +22,8 @@ const SeekBar = memo(function SeekBar({
   events,        
   activeCamera,  
   activeEventId, 
+  selectedEventIdx,
+  segmentListOpen,
   onSeek,        
   onEventJump,   
 }) {
@@ -45,12 +47,17 @@ const SeekBar = memo(function SeekBar({
       currentTime
     )
 
-  const seekFromEvent = useCallback((e) => {
+  const getFracFromMouse = useCallback((clientX) => {
+    if (!trackRef.current) return 0
     const rect = trackRef.current.getBoundingClientRect()
-    const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+  }, [])
+
+  const seekFromEvent = useCallback((e) => {
+    const frac = getFracFromMouse(e.clientX)
     const targetTime = rangeStart + frac * (rangeEnd - rangeStart)
     onSeek(targetTime)
-  }, [rangeStart, rangeEnd, onSeek])
+  }, [rangeStart, rangeEnd, onSeek, getFracFromMouse])
 
   const onMouseDown = (e) => {
     dragging.current = true
@@ -60,18 +67,57 @@ const SeekBar = memo(function SeekBar({
   }
   const onMouseMove = useCallback((e) => {
     if (dragging.current) seekFromEvent(e)
-    
     if (trackRef.current) {
-      const rect = trackRef.current.getBoundingClientRect()
-      const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-      setHoverFrac(frac)
+      setHoverFrac(getFracFromMouse(e.clientX))
     }
-  }, [seekFromEvent])
+  }, [seekFromEvent, getFracFromMouse])
   const onMouseUp = useCallback(() => {
     dragging.current = false
     window.removeEventListener('mousemove', onMouseMove)
     window.removeEventListener('mouseup', onMouseUp)
   }, [onMouseMove])
+
+  const currentShotIdx = useMemo(() => {
+    let idx = selectedEventIdx !== undefined ? selectedEventIdx : -1;
+    if (idx < 0 && events && events.length > 0 && currentTime != null && activeCamera) {
+      for (let i = 0; i < events.length; i++) {
+        const t = events[i].playback?.[activeCamera]?.time;
+        if (t != null && t <= currentTime + 0.5) {
+          idx = i;
+        } else if (t != null && t > currentTime + 0.5) {
+          break;
+        }
+      }
+    }
+    return idx;
+  }, [events, currentTime, activeCamera, selectedEventIdx]);
+
+  const jumpToEvent = useCallback((dir) => {
+    if (!events || events.length === 0) return
+    let baseIdx = currentShotIdx >= 0 ? currentShotIdx : (dir > 0 ? -1 : events.length);
+    let nextIdx = baseIdx + dir;
+    if (nextIdx < 0) nextIdx = 0;
+    if (nextIdx >= events.length) nextIdx = events.length - 1;
+    onEventJump(events[nextIdx]);
+  }, [events, currentShotIdx, onEventJump])
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (segmentListOpen) return;
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        jumpToEvent(-1);
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        jumpToEvent(1);
+      }
+    }
+
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [jumpToEvent, segmentListOpen])
+
 
   useEffect(() => {
     return () => {
@@ -82,11 +128,9 @@ const SeekBar = memo(function SeekBar({
 
   const handleTrackHover = useCallback((e) => {
     if (trackRef.current) {
-      const rect = trackRef.current.getBoundingClientRect()
-      const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-      setHoverFrac(frac)
+      setHoverFrac(getFracFromMouse(e.clientX))
     }
-  }, [])
+  }, [getFracFromMouse])
 
   const handleTrackLeave = useCallback(() => {
     if (!dragging.current) setHoverFrac(null)
@@ -135,6 +179,47 @@ const SeekBar = memo(function SeekBar({
         color: 'var(--muted)',
       }}>
         <span>DVR Window · {segments.length} segments</span>
+        
+        {/* Event Navigation */}
+        {events && events.length > 0 && (
+          <div style={{
+            display: 'flex', gap: '6px', alignItems: 'center',
+            background: 'rgba(255,255,255,0.08)',
+            borderRadius: '6px',
+            padding: '2px 4px',
+            border: '1px solid rgba(255,255,255,0.15)',
+          }}>
+            <button
+              onClick={() => jumpToEvent(-1)}
+              title="Previous event (←)"
+              style={{
+                width: '24px', height: '24px', border: 'none', background: 'rgba(255,255,255,0.1)',
+                borderRadius: '4px', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer'
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+            </button>
+            <span style={{
+              color: currentShotIdx >= 0 ? 'var(--amber)' : 'white',
+              padding: '0 8px', minWidth: '70px', textAlign: 'center', fontWeight: 600, letterSpacing: '0.05em', fontSize: '12px'
+            }}>
+              {currentShotIdx >= 0
+                ? `SHOT ${currentShotIdx + 1} OF ${events.length}`
+                : `${events.length} EVENTS`}
+            </span>
+            <button
+              onClick={() => jumpToEvent(1)}
+              title="Next event (→)"
+              style={{
+                width: '24px', height: '24px', border: 'none', background: 'rgba(255,255,255,0.1)',
+                borderRadius: '4px', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer'
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+            </button>
+          </div>
+        )}
+
         <span style={{ fontFamily: 'var(--mono)', fontSize: '14px', color: 'var(--amber)' }}>
           {behind !== null && behind > 1 ? `−${behind}s` : 'LIVE'}
         </span>
@@ -162,7 +247,7 @@ const SeekBar = memo(function SeekBar({
           <div style={{
             position: 'absolute',
             bottom: '30px',
-            left: `${hoverFrac * 100}%`,
+            left: `${Math.max(2, Math.min(98, hoverFrac * 100))}%`,
             transform: 'translateX(-50%)',
             background: 'rgba(10, 10, 14, 0.95)',
             border: '1px solid rgba(245, 166, 35, 0.3)',

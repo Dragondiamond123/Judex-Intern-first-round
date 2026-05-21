@@ -25,8 +25,8 @@ const Player = memo(function Player({
   onGoLive,
   onEnterReview,
   onEventJump,
-  onCameraSwitch,
   inReview,
+  selectedEventIdx,
 }) {
   const [showControls, setShowControls] = useState(true)
   const [showSegList, setShowSegList] = useState(false)
@@ -51,8 +51,9 @@ const Player = memo(function Player({
     const video = videoRef.current?.[activeCamera]
     if (!video) return
     segEndRef.current = seg.end
+    video.pause()
     video.currentTime = seg.start
-    video.play().catch(() => { })
+    requestAnimationFrame(() => video.play().catch(() => { }))
   }, [videoRef, activeCamera])
 
   const handleGoLive = useCallback(() => {
@@ -80,17 +81,9 @@ const Player = memo(function Player({
     hoverTimer.current = setTimeout(() => setShowControls(false), 2500)
   }
 
-  
-  const [currentEventIdx, setCurrentEventIdx] = useState(-1)
-
-  const jumpToEvent = useCallback((dir) => {
-    if (!events || events.length === 0) return
-    let nextIdx = currentEventIdx + dir
-    if (nextIdx < 0) nextIdx = 0
-    if (nextIdx >= events.length) nextIdx = events.length - 1
-    setCurrentEventIdx(nextIdx)
-    onEventJump(events[nextIdx])
-  }, [events, currentEventIdx, onEventJump])
+  useEffect(() => {
+    return () => clearTimeout(hoverTimer.current)
+  }, [])
 
   
   const togglePlayPause = useCallback(() => {
@@ -101,36 +94,11 @@ const Player = memo(function Player({
     }
   }, [videoRef, activeCamera])
 
-  
-  const handleKeyDown = useCallback((e) => {
-    if (e.key === 'ArrowLeft') {
-      e.preventDefault()
-      jumpToEvent(-1)
-    } else if (e.key === 'ArrowRight') {
-      e.preventDefault()
-      jumpToEvent(1)
-    } else if (e.key === ' ') {
-      e.preventDefault()
-      togglePlayPause()
-    } else if (e.key === '1') {
-      e.preventDefault()
-      onCameraSwitch?.('source')
-    } else if (e.key === '2') {
-      e.preventDefault()
-      onCameraSwitch?.('sink')
-    } else if (e.key === '3') {
-      e.preventDefault()
-      onCameraSwitch?.('hq')
-    }
-  }, [jumpToEvent, togglePlayPause, onCameraSwitch])
-
   return (
     <div
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
       onMouseMove={onMouseMove}
-      onKeyDown={handleKeyDown}
-      tabIndex={0}
       style={{
         position: 'absolute',
         inset: 0,
@@ -298,64 +266,6 @@ const Player = memo(function Player({
             </button>
 
             <LiveBadge isLive={isLive && !isPaused} onClick={handleGoLive} />
-
-            {}
-            {events.length > 0 && (
-              <div style={{
-                display: 'flex', gap: '6px', alignItems: 'center',
-                background: 'rgba(255,255,255,0.08)',
-                borderRadius: '6px',
-                padding: '4px',
-                border: '1px solid rgba(255,255,255,0.15)',
-              }}>
-                <button
-                  id="btn-prev-event"
-                  className="ctrl-btn"
-                  onClick={() => jumpToEvent(-1)}
-                  title="Previous event (←)"
-                  style={{
-                    width: '32px', height: '32px',
-                    border: 'none',
-                    background: 'rgba(255,255,255,0.1)',
-                    borderRadius: '4px',
-                    color: 'white',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center'
-                  }}
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
-                </button>
-                <span style={{
-                  fontFamily: 'var(--condensed)',
-                  fontSize: '15px',
-                  color: currentEventIdx >= 0 ? 'var(--amber)' : 'white',
-                  padding: '0 12px',
-                  minWidth: '70px',
-                  textAlign: 'center',
-                  fontWeight: 600,
-                  letterSpacing: '0.05em'
-                }}>
-                  {currentEventIdx >= 0
-                    ? `EVENT ${events[currentEventIdx]?.shot_id ?? '?'}`
-                    : `${events.length} EVENTS`}
-                </span>
-                <button
-                  id="btn-next-event"
-                  className="ctrl-btn"
-                  onClick={() => jumpToEvent(1)}
-                  title="Next event (→)"
-                  style={{
-                    width: '32px', height: '32px',
-                    border: 'none',
-                    background: 'rgba(255,255,255,0.1)',
-                    borderRadius: '4px',
-                    color: 'white',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center'
-                  }}
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
-                </button>
-              </div>
-            )}
           </div>
 
           <div style={{
@@ -398,7 +308,9 @@ const Player = memo(function Player({
             segments={segments}
             events={events}
             activeCamera={activeCamera}
-            activeEventId={currentEventIdx >= 0 ? events[currentEventIdx]?.shot_id : null}
+            activeEventId={selectedEventIdx >= 0 ? events[selectedEventIdx]?.shot_id : null}
+            selectedEventIdx={selectedEventIdx}
+            segmentListOpen={showSegList}
             onSeek={onSeek}
             onEventJump={onEventJump}
           />

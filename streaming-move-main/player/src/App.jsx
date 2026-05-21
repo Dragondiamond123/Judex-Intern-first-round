@@ -58,6 +58,16 @@ function buildReviewPlaylist(segments, blobUrls) {
   return lines.join('\n')
 }
 
+function destroyPlaybackResources(hlsRefs, blobUrlRefs) {
+  CAMERAS.forEach(cam => {
+    hlsRefs.current[cam]?.destroy()
+    hlsRefs.current[cam] = null
+
+    blobUrlRefs.current[cam].forEach(url => URL.revokeObjectURL(url))
+    blobUrlRefs.current[cam] = []
+  })
+}
+
 export default function App() {
   const videoRefs = useRef({ source: null, sink: null, hq: null })
   const hlsRefs = useRef({ source: null, sink: null, hq: null })
@@ -69,6 +79,7 @@ export default function App() {
   const modeRef = useRef('live')
   const [status, setStatus] = useState('connecting')
   const [events, setEvents] = useState([])
+  const [cameraUrls, setCameraUrls] = useState(null)
   const [bufferCounts, setBufferCounts] = useState({ source: 0, sink: 0, hq: 0 })
 
   const [currentTime, setCurrentTime] = useState(0)
@@ -85,6 +96,101 @@ export default function App() {
   const activeCamRef = useRef('hq')
   const switchIdRef = useRef(0)  
 
+  const handleCameraSwitch = useCallback(async (targetCam) => {
+    if (targetCam === activeCamRef.current) return
+
+    const fromCam = activeCamRef.current
+    const fromVideo = videoRefs.current[fromCam]
+    const toVideo = videoRefs.current[targetCam]
+    if (!fromVideo || !toVideo) return
+
+    
+    const thisSwitchId = ++switchIdRef.current
+
+    console.log(`[switch] ${fromCam} → ${targetCam}`)
+
+    
+    activeCamRef.current = targetCam
+    setActiveCamera(targetCam)
+    setStatus('playing')
+
+    
+    if (toVideo.paused) {
+      toVideo.play().catch(() => { })
+    }
+
+    
+    const buf = rollingBuffers.current[targetCam]
+    setLiveSegments(buf.map(s => ({
+      sn: s.sn,
+      start: s.originalStart,
+      end: s.originalStart + s.duration,
+    })))
+
+    
+    
+    
+
+    
+    if (modeRef.current === 'live') {
+      try {
+        
+        const fromHls = hlsRefs.current[fromCam]
+        let fromSeg = 0
+        if (fromHls) {
+          const details = fromHls.levels?.[fromHls.currentLevel]?.details
+          if (details?.fragments) {
+            const ct = fromVideo.currentTime
+            for (const frag of details.fragments) {
+              if (ct >= frag.start && ct < frag.start + frag.duration) {
+                fromSeg = frag.sn
+                break
+              }
+            }
+          }
+        }
+
+        const exactTime = fromVideo.currentTime;
+        const res = await fetch(`${API_BASE}/sync?from_camera=${fromCam}&from_seg=${fromSeg}&from_time=${exactTime}`)
+        if (!res.ok) throw new Error('API error')
+        const syncData = await res.json()
+
+        
+        if (switchIdRef.current === thisSwitchId && syncData[targetCam]?.time != null && syncData[fromCam]?.time != null) {
+          const fromTimeMid = syncData[fromCam].time
+          const toTimeMid = syncData[targetCam].time
+
+          
+          const offset = fromVideo.currentTime - fromTimeMid
+          const exactTargetTime = toTimeMid + offset
+
+          const diff = exactTargetTime - toVideo.currentTime
+          const absDiff = Math.abs(diff)
+          
+          
+          if (absDiff > 1.0) {
+            toVideo.currentTime = exactTargetTime
+          } else if (absDiff > 0.15) {
+            toVideo.currentTime += diff * 0.1
+          }
+        }
+      } catch (e) {
+        
+        console.warn(`[switch] Sync API failed (non-critical):`, e.message)
+      }
+    } else {
+      
+      toVideo.currentTime = fromVideo.currentTime
+      
+      if (fromVideo.paused) {
+        toVideo.pause()
+      } else {
+        toVideo.play().catch(() => { })
+      }
+    }
+  }, [])
+
+
   const setModeBoth = useCallback((m) => {
     modeRef.current = m
     setMode(m)
@@ -93,16 +199,22 @@ export default function App() {
   
   useEffect(() => {
     fetch(`${API_BASE}/events`)
-      .then(r => r.json())
+      .then(r => { if (!r.ok) throw new Error('API error'); return r.json() })
       .then(data => {
         setEvents(data)
         console.log(`[init] Loaded ${data.length} events`)
       })
       .catch(e => console.warn('[init] Failed to load events:', e))
+
+    fetch(`${API_BASE}/cameras`)
+      .then(r => { if (!r.ok) throw new Error('API error'); return r.json() })
+      .then(data => setCameraUrls(data))
+      .catch(e => console.warn('[init] Failed to load cameras:', e))
   }, [])
 
   
   const initAllLive = useCallback(() => {
+    if (!cameraUrls) return;
     if (!Hls.isSupported()) {
       setStatus('error')
       setErrorMsg('hls.js not supported in this browser')
@@ -119,9 +231,9 @@ export default function App() {
 
       const hls = new Hls(LIVE_CONFIG)
       hlsRefs.current[cam] = hls
-      hls.loadSource(`${API_BASE}/${cam}/live.m3u8`)
+      hls.loadSource(cameraUrls[cam])
 
-      
+      // Bind to video elemented = true
       video.muted = true
       video.playsInline = true
 
@@ -199,7 +311,7 @@ export default function App() {
     })
 
     setModeBoth('live')
-  }, [setModeBoth])
+  }, [setModeBoth, cameraUrls])
 
   
   
@@ -208,6 +320,7 @@ export default function App() {
       if (modeRef.current !== 'live') return
 
       CAMERAS.forEach(cam => {
+        if (cam !== activeCamRef.current) return
         const video = videoRefs.current[cam]
         const hls = hlsRefs.current[cam]
         if (video && hls && video.paused && video.readyState >= 3) {
@@ -242,10 +355,56 @@ export default function App() {
           video.currentTime += drift * 0.1
         }
       })
-    }, 2000)
+    }, 500)
 
     return () => clearInterval(syncInterval)
   }, [])
+
+  
+  const handleEventJump = useCallback((event) => {
+    CAMERAS.forEach(cam => {
+      const playback = event.playback?.[cam]
+      const video = videoRefs.current[cam]
+      if (playback?.time != null && video) {
+        video.currentTime = playback.time
+        if (cam === activeCamRef.current) {
+          video.play().catch(() => { })
+        } else {
+          video.pause()
+        }
+      }
+    })
+    const idx = events.findIndex(e => e.shot_id === event.shot_id)
+    setSelectedEvent(event)
+    setSelectedEventIdx(idx)
+  }, [events])
+
+
+
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.key === ' ') {
+        e.preventDefault()
+        const video = videoRefs.current[activeCamRef.current]
+        if (video) {
+          if (video.paused) video.play().catch(() => {})
+          else video.pause()
+        }
+      } else if (e.key === '1') {
+        e.preventDefault()
+        handleCameraSwitch('source')
+      } else if (e.key === '2') {
+        e.preventDefault()
+        handleCameraSwitch('sink')
+      } else if (e.key === '3') {
+        e.preventDefault()
+        handleCameraSwitch('hq')
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [handleCameraSwitch])
 
 
   
@@ -288,10 +447,7 @@ export default function App() {
 
     return () => {
       cancelAnimationFrame(rafRef.current)
-      CAMERAS.forEach(cam => {
-        hlsRefs.current[cam]?.destroy()
-        blobUrlRefs.current[cam].forEach(url => URL.revokeObjectURL(url))
-      })
+      destroyPlaybackResources(hlsRefs, blobUrlRefs)
     }
   }, [initAllLive, tick])
 
@@ -303,97 +459,6 @@ export default function App() {
   
   
   
-  const handleCameraSwitch = useCallback(async (targetCam) => {
-    if (targetCam === activeCamRef.current) return
-
-    const fromCam = activeCamRef.current
-    const fromVideo = videoRefs.current[fromCam]
-    const toVideo = videoRefs.current[targetCam]
-    if (!fromVideo || !toVideo) return
-
-    
-    const thisSwitchId = ++switchIdRef.current
-
-    console.log(`[switch] ${fromCam} → ${targetCam}`)
-
-    
-    activeCamRef.current = targetCam
-    setActiveCamera(targetCam)
-    setStatus('playing')
-
-    
-    if (toVideo.paused) {
-      toVideo.play().catch(() => { })
-    }
-
-    
-    const buf = rollingBuffers.current[targetCam]
-    setLiveSegments(buf.map(s => ({
-      sn: s.sn,
-      start: s.originalStart,
-      end: s.originalStart + s.duration,
-    })))
-
-    
-    
-    
-
-    
-    if (modeRef.current === 'live') {
-      try {
-        
-        const fromHls = hlsRefs.current[fromCam]
-        let fromSeg = 0
-        if (fromHls) {
-          const details = fromHls.levels?.[fromHls.currentLevel]?.details
-          if (details?.fragments) {
-            const ct = fromVideo.currentTime
-            for (const frag of details.fragments) {
-              if (ct >= frag.start && ct < frag.start + frag.duration) {
-                fromSeg = frag.sn
-                break
-              }
-            }
-          }
-        }
-
-        const res = await fetch(`${API_BASE}/sync?from_camera=${fromCam}&from_seg=${fromSeg}`)
-        const syncData = await res.json()
-
-        
-        if (switchIdRef.current === thisSwitchId && syncData[targetCam]?.time != null && syncData[fromCam]?.time != null) {
-          const fromTimeMid = syncData[fromCam].time
-          const toTimeMid = syncData[targetCam].time
-
-          
-          const offset = fromVideo.currentTime - fromTimeMid
-          const exactTargetTime = toTimeMid + offset
-
-          const diff = exactTargetTime - toVideo.currentTime
-          const absDiff = Math.abs(diff)
-          
-          
-          if (absDiff > 1.0) {
-            
-            toVideo.currentTime += diff * 0.25
-            console.log(`[switch] Soft sync: ${absDiff.toFixed(1)}s drift → nudging ${targetCam}`)
-          }
-        }
-      } catch (e) {
-        
-        console.warn(`[switch] Sync API failed (non-critical):`, e.message)
-      }
-    } else {
-      
-      toVideo.currentTime = fromVideo.currentTime
-      
-      if (fromVideo.paused) {
-        toVideo.pause()
-      } else {
-        toVideo.play().catch(() => { })
-      }
-    }
-  }, [])
 
   
   const enterReview = useCallback(() => {
@@ -407,6 +472,7 @@ export default function App() {
       anyValid = true
 
       
+      blobUrlRefs.current[cam]?.forEach(url => URL.revokeObjectURL(url))
       const fragUrls = snapshot.map(s =>
         URL.createObjectURL(new Blob([s.bytes], { type: 'video/mp2t' }))
       )
@@ -466,14 +532,9 @@ export default function App() {
   const exitReview = useCallback(() => {
     console.log('[review] Exiting review mode — restoring live streams')
 
+    destroyPlaybackResources(hlsRefs, blobUrlRefs)
+
     CAMERAS.forEach(cam => {
-      hlsRefs.current[cam]?.destroy()
-      hlsRefs.current[cam] = null
-
-      
-      blobUrlRefs.current[cam].forEach(url => URL.revokeObjectURL(url))
-      blobUrlRefs.current[cam] = []
-
       rollingBuffers.current[cam] = []
     })
 
@@ -518,24 +579,6 @@ export default function App() {
     })
   }, [exitReview])
 
-  
-  const handleEventJump = useCallback((event) => {
-    
-    
-    CAMERAS.forEach(cam => {
-      const playback = event.playback?.[cam]
-      const video = videoRefs.current[cam]
-      if (playback?.time != null && video) {
-        video.currentTime = playback.time
-        video.play().catch(() => { })
-      }
-    })
-    const idx = events.findIndex(e => e.shot_id === event.shot_id)
-    setSelectedEvent(event)
-    setSelectedEventIdx(idx)
-  }, [events])
-
-  
   const inReview = mode === 'review'
   const reviewStart = inReview && reviewSegs.length > 0 ? reviewSegs[0].start : null
   const reviewEnd = inReview && reviewSegs.length > 0 ? reviewSegs[reviewSegs.length - 1].end : null
@@ -690,8 +733,8 @@ export default function App() {
           onGoLive={handleGoLive}
           onEnterReview={enterReview}
           onEventJump={handleEventJump}
-          onCameraSwitch={handleCameraSwitch}
           inReview={inReview}
+          selectedEventIdx={selectedEventIdx}
         />
       </div>
 
